@@ -1,0 +1,254 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Alerta de Desligamento</title>
+<style>
+  :root {
+    --bg: #f4f6f8; --fg: #1d2733; --muted: #5b6776;
+    --ok: #1f7a4d; --warn-bg: #d92d20; --warn-fg: #ffffff;
+    --btn-bg: #1d4ed8; --btn-fg: #ffffff; --border: #d5dbe2;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #161b22; --fg: #e6edf3; --muted: #9aa7b4;
+      --ok: #3fb97a; --border: #2d3640; --btn-bg: #3b6ef0;
+    }
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; }
+  body { background: var(--bg); color: var(--fg); font: 14px/1.4 "Segoe UI", Roboto, Arial, sans-serif; }
+  #box { min-height: 100%; display: flex; align-items: center; gap: 12px; padding: 8px 16px; border-left: 6px solid var(--border); }
+  #box.ok { border-left-color: var(--ok); }
+  #box.alerta { background: var(--warn-bg); color: var(--warn-fg); border-left-color: #7a120b; animation: pisca .8s steps(2, start) infinite; }
+  @keyframes pisca { 50% { filter: brightness(1.35); } }
+  #icon { font-size: 24px; line-height: 1; }
+  #texto { flex: 1; min-width: 0; }
+  #msg { font-weight: 600; font-size: 15px; }
+  #box.alerta #msg { font-size: 18px; letter-spacing: .3px; }
+  #sub { color: var(--muted); font-size: 12px; }
+  #box.alerta #sub { color: var(--warn-fg); opacity: .9; }
+  button { border: 0; border-radius: 6px; padding: 8px 14px; cursor: pointer; background: var(--btn-bg); color: var(--btn-fg); font: inherit; font-weight: 600; white-space: nowrap; }
+  button[hidden] { display: none; }
+</style>
+</head>
+<body>
+<div id="box">
+  <div id="icon">🔔</div>
+  <div id="texto"><div id="msg">Iniciando alerta…</div><div id="sub"></div></div>
+  <button id="btn" hidden></button>
+</div>
+<script>
+(() => {
+  // ================= CONFIGURAÇÃO =================
+  const PADRAO = {
+    clientId: '89cceaf3-aa9b-43d6-b68a-55e2e4a6412c', // OAuth client "QQ Alerta de Desligamento" (Token Implicit Grant)
+    env: 'sae1.pure.cloud'
+  };
+  // =================================================
+
+  const qs = new URLSearchParams(location.search);
+  const limpa = v => (v && !v.includes('{') ? v.trim() : '');
+  const CFG = {
+    clientId: limpa(qs.get('clientId')) || PADRAO.clientId,
+    env: limpa(qs.get('env')) || PADRAO.env,
+    conversationId: limpa(qs.get('conversationId')),
+    intervalo: Math.max(2, Number(qs.get('intervalo')) || 4),
+    alertarAgenteDesligou: qs.get('alertarAgenteDesligou') === '1',
+    teste: qs.get('teste') === '1'
+  };
+  const REDIRECT = location.origin + location.pathname;
+  const K = { token: 'gcA.token', state: 'gcA.state', me: 'gcA.me', canal: 'gcA.canal' };
+  const CANAL_TTL = 23 * 3600 * 1000;
+
+  const $ = id => document.getElementById(id);
+  const box = $('box'), msg = $('msg'), sub = $('sub'), btn = $('btn'), icon = $('icon');
+  function tela(estado, texto, detalhe = '', botao = null) {
+    box.className = estado;
+    icon.textContent = estado === 'alerta' ? '⚠️' : estado === 'ok' ? '✅' : '🔔';
+    msg.textContent = texto; sub.textContent = detalhe;
+    if (botao) { btn.textContent = botao.texto; btn.onclick = botao.acao; btn.hidden = false; }
+    else { btn.hidden = true; btn.onclick = null; }
+  }
+  const ss = {
+    get(k) { try { return JSON.parse(sessionStorage.getItem(k)); } catch { return null; } },
+    set(k, v) { try { sessionStorage.setItem(k, JSON.stringify(v)); } catch {} },
+    del(k) { try { sessionStorage.removeItem(k); } catch {} }
+  };
+
+  // ---------- Retorno do login (popup) ----------
+  if (location.hash.includes('access_token')) {
+    const h = new URLSearchParams(location.hash.slice(1));
+    const dados = { type: 'gcA-token', token: h.get('access_token'),
+      exp: Date.now() + (Number(h.get('expires_in')) || 3600) * 1000 - 60000, state: h.get('state') };
+    history.replaceState(null, '', location.pathname + location.search);
+    if (window.opener && !window.opener.closed) {
+      window.opener.postMessage(dados, location.origin);
+      document.body.textContent = 'Alerta conectado. Pode fechar esta janela.';
+      window.close();
+      return;
+    }
+  }
+
+  // ---------- Som ----------
+  let ctx = null;
+  try { ctx = new (window.AudioContext || window.webkitAudioContext)(); } catch {}
+  const somOk = () => ctx && ctx.state === 'running';
+  const liberarSom = () => { if (ctx && ctx.state !== 'running') ctx.resume().catch(() => {}); };
+  addEventListener('pointerdown', liberarSom, true);
+  addEventListener('keydown', liberarSom, true);
+  function bipe() {
+    if (!ctx) return;
+    liberarSom();
+    const t0 = ctx.currentTime;
+    [0, .22, .44].forEach((d, i) => {
+      const o = ctx.createOscillator(), g = ctx.createGain();
+      o.type = 'square'; o.frequency.value = i === 2 ? 1175 : 880;
+      g.gain.setValueAtTime(.0001, t0 + d);
+      g.gain.exponentialRampToValueAtTime(.25, t0 + d + .01);
+      g.gain.exponentialRampToValueAtTime(.0001, t0 + d + .18);
+      o.connect(g).connect(ctx.destination); o.start(t0 + d); o.stop(t0 + d + .2);
+    });
+  }
+
+  // ---------- Alerta ----------
+  let alertando = false, timerBipe = null;
+  function iniciarAlerta() {
+    if (alertando) return;
+    alertando = true;
+    tela('alerta', 'CLIENTE DESLIGOU — FAÇA A TABULAÇÃO',
+      somOk() ? 'Selecione o código de tabulação para encerrar.' : 'Som bloqueado: clique neste quadro para liberar o bipe.');
+    bipe(); timerBipe = setInterval(bipe, CFG.intervalo * 1000);
+  }
+  function pararAlerta() { alertando = false; clearInterval(timerBipe); timerBipe = null; }
+
+  // ---------- Login ----------
+  const token = () => { const t = ss.get(K.token); return t && t.exp > Date.now() ? t.token : null; };
+  function pedirLogin(motivo) {
+    fecharSocket();
+    tela('', 'Alerta de desligamento desativado', motivo || 'Clique em Ativar (uma vez por turno).', {
+      texto: 'Ativar alerta',
+      acao: () => {
+        liberarSom();
+        const state = crypto.getRandomValues(new Uint32Array(4)).join('-');
+        ss.set(K.state, state);
+        const url = `https://login.${CFG.env}/oauth/authorize?` + new URLSearchParams({
+          response_type: 'token', client_id: CFG.clientId, redirect_uri: REDIRECT, state });
+        const w = window.open(url, 'gcAlertaLogin', 'width=520,height=640');
+        if (!w) tela('', 'O navegador bloqueou a janela de login', 'Libere pop-ups para o Genesys Cloud e tente de novo.', { texto: 'Tentar de novo', acao: () => pedirLogin() });
+        else tela('', 'Aguardando login…', 'Conclua o login na janela que abriu.');
+      }
+    });
+  }
+  addEventListener('message', e => {
+    if (e.origin !== location.origin || !e.data || e.data.type !== 'gcA-token') return;
+    if (!e.data.state || e.data.state !== ss.get(K.state)) return;
+    ss.set(K.token, { token: e.data.token, exp: e.data.exp });
+    ss.del(K.canal);
+    iniciar();
+  });
+
+  async function api(path, metodo = 'GET', corpo) {
+    const t = token();
+    if (!t) throw Object.assign(new Error('sem token'), { auth: true });
+    const r = await fetch(`https://api.${CFG.env}${path}`, {
+      method: metodo, body: corpo ? JSON.stringify(corpo) : undefined,
+      headers: { Authorization: 'Bearer ' + t, 'Content-Type': 'application/json' } });
+    if (r.status === 401) { ss.del(K.token); throw Object.assign(new Error('401'), { auth: true }); }
+    if (!r.ok) throw Object.assign(new Error(`${path} → HTTP ${r.status}`), { status: r.status });
+    return r.status === 204 ? null : r.json();
+  }
+
+  // ---------- Regra do alerta ----------
+  const fim = s => s === 'disconnected' || s === 'terminated';
+  function midias(p) {
+    const l = [];
+    for (const k of ['calls', 'callbacks', 'chats', 'emails', 'messages']) for (const m of (p[k] || [])) l.push(m);
+    if (!l.length && p.state) l.push(p);
+    return l;
+  }
+  let meuId = null, concluido = false;
+  function avaliar(conv) {
+    if (concluido || !conv || conv.id !== CFG.conversationId) return;
+    const meus = (conv.participants || []).filter(p => p.purpose === 'agent' && (p.userId || (p.user && p.user.id)) === meuId);
+    const eu = meus[meus.length - 1];
+    if (!eu) return;
+    if (eu.wrapup && (eu.wrapup.code || eu.wrapup.name)) {
+      pararAlerta(); concluido = true; fecharSocket();
+      return tela('ok', 'Tabulação registrada', 'Atendimento concluído.');
+    }
+    const m = midias(eu);
+    if (!(m.length && m.every(x => fim(x.state)))) {
+      if (alertando) pararAlerta();
+      return tela('ok', 'Alerta ativo', somOk() ? 'Você será avisado com bipe se o cliente desligar.' : 'Clique uma vez neste quadro para liberar o som.');
+    }
+    if (m.some(x => x.disconnectType === 'client') && !CFG.alertarAgenteDesligou) {
+      return tela('ok', 'Chamada encerrada por você', 'Lembre-se de fazer a tabulação.');
+    }
+    iniciarAlerta();
+  }
+
+  // ---------- Notifications API (eventos, sem polling) ----------
+  let ws = null, fechandoDeProposito = false, tentativas = 0;
+  function fecharSocket() { fechandoDeProposito = true; try { ws && ws.close(); } catch {} ws = null; }
+
+  async function obterCanal(forcarNovo) {
+    let c = ss.get(K.canal);
+    if (!forcarNovo && c && c.userId === meuId && Date.now() - c.criado < CANAL_TTL) return c;
+    const novo = await api('/api/v2/notifications/channels', 'POST');
+    await api(`/api/v2/notifications/channels/${novo.id}/subscriptions`, 'PUT', [{ id: `v2.users.${meuId}.conversations` }]);
+    c = { id: novo.id, uri: novo.connectUri, userId: meuId, criado: Date.now() };
+    ss.set(K.canal, c);
+    return c;
+  }
+
+  async function conectar(forcarNovo = false) {
+    const c = await obterCanal(forcarNovo);
+    fechandoDeProposito = false;
+    ws = new WebSocket(c.uri);
+    ws.onopen = () => { tentativas = 0; };
+    ws.onmessage = e => {
+      let m; try { m = JSON.parse(e.data); } catch { return; }
+      if (m.topicName === 'v2.system.socket_closing') { ss.del(K.canal); return; }
+      if (m.topicName && m.topicName.startsWith('v2.users.') && m.eventBody) avaliar(m.eventBody);
+    };
+    ws.onclose = () => {
+      if (fechandoDeProposito || concluido) return;
+      const espera = Math.min(30000, 2000 * 2 ** tentativas++);
+      sub.textContent = 'Reconectando…';
+      setTimeout(() => conectar(true).catch(tratarErro), espera);
+    };
+  }
+
+  function tratarErro(e) {
+    if (e && e.auth) return pedirLogin('Sessão expirada. Clique em Ativar novamente.');
+    tela('', 'Não foi possível conectar ao Genesys', String(e && e.message || e), { texto: 'Tentar de novo', acao: iniciar });
+  }
+
+  async function iniciar() {
+    if (!token()) return pedirLogin();
+    try {
+      const me = ss.get(K.me);
+      if (me && me.tokenTail === token().slice(-8)) meuId = me.id;
+      else { meuId = (await api('/api/v2/users/me')).id; ss.set(K.me, { id: meuId, tokenTail: token().slice(-8) }); }
+      await conectar();
+      tela('ok', 'Alerta ativo', somOk() ? 'Som liberado.' : 'Clique uma vez neste quadro para liberar o som.');
+      // Estado atual (caso o script tenha aberto depois do desligamento)
+      avaliar(await api(`/api/v2/conversations/${encodeURIComponent(CFG.conversationId)}`));
+    } catch (e) { tratarErro(e); }
+  }
+
+  // ---------- Início ----------
+  if (CFG.teste) {
+    return tela('', 'Modo de teste', 'Clique para simular o cliente desligando (10 s).', { texto: 'Testar alerta', acao: () => {
+      liberarSom(); setTimeout(() => { iniciarAlerta(); setTimeout(() => { pararAlerta(); tela('ok', 'Teste concluído', 'O bipe funcionou?'); }, 10000); }, 300);
+    } });
+  }
+  if (CFG.clientId.startsWith('COLE_')) return tela('', 'Alerta não configurado', 'Defina o clientId no arquivo ou na URL.');
+  if (!CFG.conversationId) return tela('', 'Sem ID da interação', 'Use ?conversationId={{scripter.interactionId}} na URL do script.');
+  iniciar();
+})();
+</script>
+</body>
+</html>
