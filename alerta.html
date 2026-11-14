@@ -71,22 +71,26 @@
     if (botao) { btn.textContent = botao.texto; btn.onclick = botao.acao; btn.hidden = false; }
     else { btn.hidden = true; btn.onclick = null; }
   }
-  const ss = {
-    get(k) { try { return JSON.parse(sessionStorage.getItem(k)); } catch { return null; } },
-    set(k, v) { try { sessionStorage.setItem(k, JSON.stringify(v)); } catch {} },
-    del(k) { try { sessionStorage.removeItem(k); } catch {} }
-  };
+  // Token fica no localStorage (sobrevive a cada novo atendimento e a recarregar a aba);
+  // o resto fica no sessionStorage.
+  const mk = area => ({
+    get(k) { try { return JSON.parse(area().getItem(k)); } catch { return null; } },
+    set(k, v) { try { area().setItem(k, JSON.stringify(v)); } catch {} },
+    del(k) { try { area().removeItem(k); } catch {} }
+  });
+  const ss = mk(() => sessionStorage), ls = mk(() => localStorage);
 
-  // ---------- Retorno do login (popup) ----------
-  if (location.hash.includes('access_token')) {
+  // ---------- Retorno do login (quadro oculto ou popup) ----------
+  if (location.hash.includes('access_token') || location.hash.includes('error=')) {
     const h = new URLSearchParams(location.hash.slice(1));
-    const dados = { type: 'gcA-token', token: h.get('access_token'),
+    const dados = { type: 'gcA-token', token: h.get('access_token'), erro: h.get('error'),
       exp: Date.now() + (Number(h.get('expires_in')) || 3600) * 1000 - 60000, state: h.get('state') };
     history.replaceState(null, '', location.pathname + location.search);
-    if (window.opener && !window.opener.closed) {
-      window.opener.postMessage(dados, location.origin);
-      document.body.textContent = 'Alerta conectado. Pode fechar esta janela.';
-      window.close();
+    const destino = (window.opener && !window.opener.closed) ? window.opener
+      : (window.parent !== window ? window.parent : null);
+    if (destino) {
+      destino.postMessage(dados, location.origin);
+      if (destino === window.opener) { document.body.textContent = 'Alerta conectado. Pode fechar esta janela.'; window.close(); }
       return;
     }
   }
@@ -124,29 +128,58 @@
   function pararAlerta() { alertando = false; clearInterval(timerBipe); timerBipe = null; }
 
   // ---------- Login ----------
-  const token = () => { const t = ss.get(K.token); return t && t.exp > Date.now() ? t.token : null; };
-  function pedirLogin(motivo) {
+  const token = () => { const t = ls.get(K.token); return t && t.exp > Date.now() ? t.token : null; };
+  const novoState = () => { const s = crypto.getRandomValues(new Uint32Array(4)).join('-'); ss.set(K.state, s); return s; };
+  const urlLogin = state => `https://login.${CFG.env}/oauth/authorize?` + new URLSearchParams({
+    response_type: 'token', client_id: CFG.clientId, redirect_uri: REDIRECT, state });
+
+  // 1) Login silencioso: quadro oculto aproveita a sessão do Genesys já aberta (sem clique).
+  let quadroLogin = null, timerSilencioso = null;
+  function loginSilencioso() {
+    return new Promise(resolve => {
+      tela('', 'Conectando alerta…', 'Usando a sessão do Genesys já aberta.');
+      quadroLogin = document.createElement('iframe');
+      quadroLogin.style.display = 'none';
+      quadroLogin.src = urlLogin(novoState());
+      document.body.appendChild(quadroLogin);
+      aguardandoToken = ok => {
+        aguardandoToken = null; clearTimeout(timerSilencioso);
+        if (quadroLogin) { quadroLogin.remove(); quadroLogin = null; }
+        resolve(ok);
+      };
+      timerSilencioso = setTimeout(() => aguardandoToken && aguardandoToken(false), 8000);
+    });
+  }
+
+  // 2) Plano B: janela de login (o navegador pode exigir um clique).
+  function abrirPopup() {
+    const w = window.open(urlLogin(novoState()), 'gcAlertaLogin', 'width=520,height=640');
+    if (w) tela('', 'Conectando alerta…', 'Se a janela de login pedir algo, conclua por lá.');
+    return !!w;
+  }
+
+  let aguardandoToken = null;
+  async function pedirLogin(motivo) {
     fecharSocket();
+    ls.del(K.token);
+    if (await loginSilencioso()) return iniciar();
+    if (abrirPopup()) return;
     tela('', 'Alerta de desligamento desativado', motivo || 'Clique em Ativar (uma vez por turno).', {
       texto: 'Ativar alerta',
       acao: () => {
         liberarSom();
-        const state = crypto.getRandomValues(new Uint32Array(4)).join('-');
-        ss.set(K.state, state);
-        const url = `https://login.${CFG.env}/oauth/authorize?` + new URLSearchParams({
-          response_type: 'token', client_id: CFG.clientId, redirect_uri: REDIRECT, state });
-        const w = window.open(url, 'gcAlertaLogin', 'width=520,height=640');
-        if (!w) tela('', 'O navegador bloqueou a janela de login', 'Libere pop-ups para o Genesys Cloud e tente de novo.', { texto: 'Tentar de novo', acao: () => pedirLogin() });
-        else tela('', 'Aguardando login…', 'Conclua o login na janela que abriu.');
+        if (!abrirPopup()) tela('', 'O navegador bloqueou a janela de login', 'Libere pop-ups para o Genesys Cloud e tente de novo.', { texto: 'Tentar de novo', acao: () => abrirPopup() });
       }
     });
   }
   addEventListener('message', e => {
     if (e.origin !== location.origin || !e.data || e.data.type !== 'gcA-token') return;
     if (!e.data.state || e.data.state !== ss.get(K.state)) return;
-    ss.set(K.token, { token: e.data.token, exp: e.data.exp });
+    if (!e.data.token) { if (aguardandoToken) aguardandoToken(false); return; }
+    ls.set(K.token, { token: e.data.token, exp: e.data.exp });
     ss.del(K.canal);
-    iniciar();
+    if (aguardandoToken) { const f = aguardandoToken; aguardandoToken = null; f(true); }
+    else iniciar();
   });
 
   async function api(path, metodo = 'GET', corpo) {
@@ -155,7 +188,7 @@
     const r = await fetch(`https://api.${CFG.env}${path}`, {
       method: metodo, body: corpo ? JSON.stringify(corpo) : undefined,
       headers: { Authorization: 'Bearer ' + t, 'Content-Type': 'application/json' } });
-    if (r.status === 401) { ss.del(K.token); throw Object.assign(new Error('401'), { auth: true }); }
+    if (r.status === 401) { ls.del(K.token); throw Object.assign(new Error('401'), { auth: true }); }
     if (!r.ok) throw Object.assign(new Error(`${path} → HTTP ${r.status}`), { status: r.status });
     return r.status === 204 ? null : r.json();
   }
