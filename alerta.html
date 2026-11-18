@@ -122,7 +122,7 @@
   function iniciarAlerta() {
     if (alertando) return;
     alertando = true;
-    tela('alerta', 'CLIENTE DESLIGOU — FAÇA A TABULAÇÃO',
+    tela('alerta', 'LIGAÇÃO ENCERRADA — FAÇA A TABULAÇÃO',
       somOk() ? 'Selecione o código de tabulação para encerrar.' : 'Som bloqueado: clique neste quadro para liberar o bipe.');
     bipe(); timerBipe = setInterval(bipe, CFG.intervalo * 1000);
   }
@@ -215,7 +215,7 @@
     const m = midias(eu);
     if (!(m.length && m.every(x => fim(x.state)))) {
       if (alertando) pararAlerta();
-      return tela('ok', 'Alerta ativo', somOk() ? 'Você será avisado com bipe se o cliente desligar.' : 'Clique uma vez neste quadro para liberar o som.');
+      return tela('ok', 'Alerta ativo', somOk() ? 'Você será avisado com bipe quando a ligação encerrar.' : 'Clique uma vez neste quadro para liberar o som.');
     }
     if (m.some(x => x.disconnectType === 'client') && !CFG.alertarAgenteDesligou) {
       return tela('ok', 'Chamada encerrada por você', 'Lembre-se de fazer a tabulação.');
